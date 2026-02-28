@@ -14,10 +14,9 @@ from firebase_admin import credentials, firestore
 from datetime import date, time
 
 # TO DO LIST
-# SET UP THE BOT ON KOYEB
-# RECORD VIDEO, GET FEEDBACK, MAKE CHANGES,THEN DEPLOY TO THE SERVER
-
-
+# REMINDER MESSAGES WHEN THEIR STREAK IS ABOUT TO RUN OUT
+# MAYBE USER DMS OR SOMEWAY TO INDICATE THAT THEY GAINED POINTS OR STREAK
+# HELP COMMAND
 
 # Loads the discord token and the firebase creds
 load_dotenv()
@@ -171,7 +170,8 @@ async def on_ready(): # on ready event, essential for the bot, and has the loop 
             print(f"Error: {e}")
     else:
         print("Server ID not set, run .setserver to set the ID")
-    # monthly_leaderboard.start()
+    monthly_leaderboard.start()
+    weekly_leaderboard.start()
     check_streaks.start()
 
 # Commands Section
@@ -386,7 +386,7 @@ async def on_message(message):
     await bot.process_commands(message) #crucial so the bot can process written commands like .setserver
 
 # Monthly Leaderboard Handling
-@tasks.loop(time= time(hour = 0, minute = 0, second = 0))
+@tasks.loop(time = time(hour = 0, minute = 0, second = 0))
 #@bot.tree.command(name="monthly_leaderboard", description="Tests the monthly leaderboard", guild=get_guild())
 async def monthly_leaderboard():
     if date.today().day != 1:
@@ -419,7 +419,7 @@ async def monthly_leaderboard():
 @tasks.loop(time= time(hour = 0, minute = 0, second = 0))
 #@bot.tree.command(name="weekly_leaderboard", description="Tests the weekly leaderboard", guild=get_guild())
 async def weekly_leaderboard():
-    if date.today().weekday() != 0: # or date.today().day == 1:
+    if date.today().weekday() != 0 or date.today().day == 1:
         return
     user_data = db.collection('users').get()
     docs = [{'id': doc.id, **doc.to_dict()} for doc in user_data]
@@ -446,7 +446,7 @@ async def check_streaks():
     all_users = db.collection('users').get()
     for user in all_users:
         user_data = user.to_dict()
-        if missed_last_week(user_data.get('last_worksheet_date')):
+        if missed_last_week(user_data.get('last_worksheet_date')) and user_data.get('streak', 0) > 0: #zero in the bracket is the fallback value
             db.collection('users').document(user.id).update({'streak': 0})
             await log(f"Reset streak for <@{user.id}>")
 
