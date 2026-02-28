@@ -2,6 +2,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
+from discord.app_commands import Choice
 from discord.ext import tasks
 import logging
 from dotenv import load_dotenv
@@ -13,8 +14,6 @@ from firebase_admin import credentials, firestore
 from datetime import date, time
 
 # TO DO LIST
-# RESET WRITING, SPEAKING, AND DICTATION DATE COMMANDS
-# MAKE THE MONTHLY AND WEEKLY LEADERBOARD STUFF WORK PERIODICALLY NOT WITH COMMANDS
 # SET UP THE BOT ON KOYEB
 # RECORD VIDEO, GET FEEDBACK, MAKE CHANGES,THEN DEPLOY TO THE SERVER
 
@@ -82,19 +81,34 @@ config = load_config()
 async def check_user(message): #it checks that the message author is not the bot, or one of the admins, if not, it returns the user data as a dict
     if message.author == bot.user or message.author.id == config["admin1"] or message.author.id == config["admin2"]:
         return None
-    doc =db.collection('users').document(f'{str(message.author.id)}').get()
+
+    doc_ref = db.collection('users').document(f'{str(message.author.id)}')
+    doc = doc_ref.get()
+
+    default_user = {
+        'points': 0,
+        'streak': 0,
+        'last_worksheet_date': "2000-01-01",  # Placeholder dates
+        'first_worksheet_thisWeek_date': "2000-01-01",
+        'last_writing_date': "2000-01-01",
+        'last_speaking_date': "2000-01-01"
+    }
+
     if not doc.exists: #writes a new document with default values in case the author wasn't in the db
-        default_user = {
-            'points': 0,
-            'streak': 0,
-            'last_worksheet_date': "2000-01-01",  # Placeholder dates
-            'first_worksheet_thisWeek_date': "2000-01-01",
-            'last_writing_date': "2000-01-01",
-            'last_speaking_date': "2000-01-01"
-        }
-        db.collection('users').document(f'{str(message.author.id)}').set(default_user)
+        doc_ref.set(default_user)
         return default_user
-    return doc.to_dict()
+    user_data = doc.to_dict()
+    needs_update = False
+
+    for key, value in default_user.items():
+        if key not in user_data:
+            user_data[key] = value
+            needs_update = True
+    if needs_update:
+        doc_ref.set(user_data, merge=True)
+        await log(f"Healed document {message.author.mention}'s data from missing fields\nDocument ID: {message.author.id}")
+    return user_data
+
 
 async def update_leaderboard(): #function to update the leaderboard
     user_data = db.collection('users').get()
@@ -235,6 +249,32 @@ async def remove_points(interaction: discord.Interaction, user: discord.User, po
     await log(f"{points} points removed from {user.mention}")
     await update_leaderboard()
 
+@bot.tree.command(name="set_streak", description="sets the streak for a certain user", guild=get_guild())
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def set_streak(interaction: discord.Interaction, user: discord.Member, streak: int):
+    try:
+        db.collection('users').document(f'{str(user.id)}').set({'streak': streak}, merge=True)
+        await log(f"set streak for {user.mention} to {streak} by {interaction.user.id}")
+        await interaction.response.send_message(f"set streak for {user.mention} to {streak}")
+        await update_leaderboard()
+    except Exception as e:
+        await log(f"Error setting streak for {user.name}: {e}")
+
+@bot.tree.command(name="reset_date", description="resets a select date for a certain user", guild=get_guild())
+@discord.app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(date=[
+    Choice(name="Date of the first worksheet sent this week", value="first_worksheet_thisWeek_date"),
+    Choice(name="Date of the last worksheet sent", value="last_worksheet_date"),
+    Choice(name=f"Date of the last voice note in the speaking channel", value="last_speaking_date"),
+    Choice(name="Date of the last message sent in either writing channel", value="last_writing_date")
+])
+async def reset_date(interaction: discord.Interaction, user: discord.Member, date: Choice[str]):
+    date_to_reset = date.value
+    db.collection('users').document(f'{str(user.id)}').set({f'{date_to_reset}': "2000-01-01"}, merge = True)
+    await interaction.response.send_message(f"{date.name} was reset for {user.mention}", ephemeral=True)
+    await log(f"{date.name} was reset for {user.mention} by {interaction.user.mention}")
+
+
 # Event handling part
 @bot.event
 async def on_message(message):
@@ -293,6 +333,8 @@ async def on_message(message):
                         await update_leaderboard()
                         await log(f"Image detected in {message.channel.mention}, points awarded: {text_points}")
                         break
+        else:
+            await log(f"Message Detected in {message.channel.mention} from {message.author.mention}, but they already wrote one today.")
     if message.channel.id == config["speaking_channel_id"] and message.attachments:
         if user_data.get('last_speaking_date') != str(date.today()):
             for attachment in message.attachments:
@@ -344,11 +386,11 @@ async def on_message(message):
     await bot.process_commands(message) #crucial so the bot can process written commands like .setserver
 
 # Monthly Leaderboard Handling
-# @tasks.loop(time= time(hour = 0, minute = 0, second = 0))
-@bot.tree.command(name="monthly_leaderboard", description="Tests the monthly leaderboard", guild=get_guild())
-async def monthly_leaderboard(interaction: discord.Interaction):
-    #if date.today().day != 1:
-        #return
+@tasks.loop(time= time(hour = 0, minute = 0, second = 0))
+#@bot.tree.command(name="monthly_leaderboard", description="Tests the monthly leaderboard", guild=get_guild())
+async def monthly_leaderboard():
+    if date.today().day != 1:
+        return
     user_data = db.collection('users').get()
     docs = [{ 'id': doc.id, **doc.to_dict()} for doc in user_data]
     sorted_data = sorted(docs, key=lambda x: x['points'], reverse=True)
@@ -371,14 +413,14 @@ async def monthly_leaderboard(interaction: discord.Interaction):
     all_users = db.collection('users').get()
     for user in all_users:
         db.collection('users').document(user.id).update({'points': 0})
-    await interaction.response.send_message("test", ephemeral=True)
+    # await interaction.response.send_message("test", ephemeral=True)
     await log(f"Monthly leaderboard for {date.today().strftime('%B')} sent, and all the points are reset! ")
 # Weekly Leaderboard Handling
-# @tasks.loop(time= time(hour = 0, minute = 0, second = 0))
-@bot.tree.command(name="weekly_leaderboard", description="Tests the weekly leaderboard", guild=get_guild())
-async def weekly_leaderboard(interaction: discord.Interaction):
-    #if date.today().weekday() != 0:
-     #return
+@tasks.loop(time= time(hour = 0, minute = 0, second = 0))
+#@bot.tree.command(name="weekly_leaderboard", description="Tests the weekly leaderboard", guild=get_guild())
+async def weekly_leaderboard():
+    if date.today().weekday() != 0: # or date.today().day == 1:
+        return
     user_data = db.collection('users').get()
     docs = [{'id': doc.id, **doc.to_dict()} for doc in user_data]
     sorted_data = sorted(docs, key=lambda x: x['points'], reverse=True)
@@ -395,7 +437,6 @@ async def weekly_leaderboard(interaction: discord.Interaction):
             inline=False
         )
     await channel.send(embed=embed)
-    await interaction.response.send_message("test", ephemeral=True)
     await log(f"Weekly Leaderboard sent")
 
 # daily check streaks
@@ -411,5 +452,5 @@ async def check_streaks():
 
 
 
-
+webserver.keep_alive()
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
