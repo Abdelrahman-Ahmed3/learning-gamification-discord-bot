@@ -254,7 +254,7 @@ async def remove_points(interaction: discord.Interaction, user: discord.User, po
 async def set_streak(interaction: discord.Interaction, user: discord.Member, streak: int):
     try:
         db.collection('users').document(f'{str(user.id)}').set({'streak': streak}, merge=True)
-        await log(f"set streak for {user.mention} to {streak} by {interaction.user.id}")
+        await log(f"set streak for {user.mention} to {streak} by {interaction.user.mention}")
         await interaction.response.send_message(f"set streak for {user.mention} to {streak}")
         await update_leaderboard()
     except Exception as e:
