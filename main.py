@@ -280,6 +280,10 @@ async def reset_date(interaction: discord.Interaction, user: discord.Member, dat
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    if isinstance(message.channel, discord.Thread): #prevents it from reading messages in threads
+        return
+
     # Check if the message is in a tracked channel
     tracked_channels = [
         config.get("franco_channel_id"),
