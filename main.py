@@ -255,7 +255,7 @@ async def set_streak(interaction: discord.Interaction, user: discord.Member, str
     try:
         db.collection('users').document(f'{str(user.id)}').set({'streak': streak}, merge=True)
         await log(f"set streak for {user.mention} to {streak} by {interaction.user.mention}")
-        await interaction.response.send_message(f"set streak for {user.mention} to {streak}")
+        await interaction.response.send_message(f"set streak for {user.mention} to {streak}", ephemeral=True)
         await update_leaderboard()
     except Exception as e:
         await log(f"Error setting streak for {user.name}: {e}")
