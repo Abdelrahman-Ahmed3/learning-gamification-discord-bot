@@ -11,12 +11,12 @@ import json
 import webserver
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import date, time
+from datetime import date, time, timedelta
 
 # TO DO LIST
-# REMINDER MESSAGES WHEN THEIR STREAK IS ABOUT TO RUN OUT
-# MAYBE USER DMS OR SOMEWAY TO INDICATE THAT THEY GAINED POINTS OR STREAK
 # HELP COMMAND
+# ATTEMPT TO ADD A WAY TO PARSE THREAD NAME TO ADD TO THE LEADER BOARD LAST WORKSHEET DONE, AND MAYBE ADD A LIST OF NOT DONE WORKSHEETS THAT THEY CAN GET DM'D to them if needed
+# streak freeze mechanic
 
 # Loads the discord token and the firebase creds
 load_dotenv()
@@ -109,7 +109,7 @@ async def check_user(message): #it checks that the message author is not the bot
     return user_data
 
 
-async def update_leaderboard(): #function to update the leaderboard
+async def update_leaderboard(): #function to update the leaderboard, returns sorted data
     user_data = db.collection('users').get()
     docs = [{ 'id': doc.id, **doc.to_dict()} for doc in user_data] # added the discord ID (name of the document) to the user_data dict
     sorted_data = sorted(docs, key=lambda x: x['points'], reverse=True) #sorts the data by points, reverse to get descending order
@@ -137,6 +137,7 @@ async def update_leaderboard(): #function to update the leaderboard
         msg = await channel.send(embed=embed)
         config['leaderboard_message_id'] = msg.id
         db.collection('config').document('settings').set({'leaderboard_message_id': str(msg.id)}, merge=True)
+    return sorted_data
 
 def missed_last_week(date_str): #function to check if 7 days have passed from the input date
     record_date = date.fromisoformat(date_str)
@@ -280,7 +281,6 @@ async def reset_date(interaction: discord.Interaction, user: discord.Member, dat
 async def on_message(message):
     if message.author == bot.user:
         return
-
     if isinstance(message.channel, discord.Thread): #prevents it from reading messages in threads
         return
 
@@ -311,6 +311,13 @@ async def on_message(message):
     text_points = 10
     voice_points = 15
     worksheet_points = 20
+    text_points_emoji = "<:Linguazad_10:1495031679772004425>"
+    voice_points_emoji = "<:Linguazad_15:1495031741633794212>"
+    worksheet_points_emojis={0:"<:Linguazad_20:1495031721329037384>",
+                             1:"<:Linguazad_22:1495036190259150990>",
+                             2:"<:Linguazad_24:1495036411018215536>",
+                             3:"<:Linguazad_26:1495036335235272764>",
+                             4:"<:Linguazad_28:1495036282521518290>"}
     weekly_bonuspercent = 10
     min_worksheet_length = 100
     min_dictation_length = 10
@@ -326,6 +333,7 @@ async def on_message(message):
                     'points': firestore.Increment(text_points),
                     'last_writing_date': str(date.today())
                 })
+                await message.add_reaction(text_points_emoji)
                 await update_leaderboard()
             elif message.attachments:
                 for attachment in message.attachments:
@@ -334,6 +342,7 @@ async def on_message(message):
                             'points': firestore.Increment(text_points),
                             'last_writing_date':  str(date.today())
                         })
+                        await message.add_reaction(text_points_emoji)  # adds the text points emoji
                         await update_leaderboard()
                         await log(f"Image detected in {message.channel.mention}, points awarded: {text_points}")
                         break
@@ -347,6 +356,7 @@ async def on_message(message):
                         'points': firestore.Increment(voice_points),
                         'last_speaking_date': str(date.today())
                     })
+                    await message.add_reaction(voice_points_emoji)  # adds the voice points emoji
                     await update_leaderboard()
                     await log(f"{message.author.mention} sent a voice message in {message.channel.mention}, points awarded: {voice_points}")
                 else:
@@ -354,29 +364,85 @@ async def on_message(message):
         else:
             await log(f"{message.author.mention} sent a message in {message.channel.mention}, but they already sent one today ")
     if message.channel.id == config['worksheet_channel_id'] and len(message.content) >= min_worksheet_length:
-        first_date = user_data.get('first_worksheet_thisWeek_date')
-        if missed_last_week(first_date):
-            # new window, streak +1
-            db.collection('users').document(str(message.author.id)).update({
-                'points': firestore.Increment(int(worksheet_points * (1 + effective_streak * weekly_bonuspercent/100))),
-                'last_worksheet_date': str(date.today()),
-                'first_worksheet_thisWeek_date': str(date.today()),
-                'streak': firestore.Increment(1)
-            })
-            await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {worksheet_points}, streak: increased by 1")
-        else:
-            # within window, points with streak bonus but no streak increment
-            db.collection('users').document(str(message.author.id)).update({
-                'points': firestore.Increment(int(worksheet_points * (1 + effective_streak * weekly_bonuspercent/100))),
-                'last_worksheet_date': str(date.today()),
-            })
-            await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {worksheet_points}, streak: not increased because their last one was within 7 days ")
-        await update_leaderboard()
+        try:
+            first_date = user_data.get('first_worksheet_thisWeek_date')
+            effective_points = int(worksheet_points * (1 + effective_streak * weekly_bonuspercent / 100))
+            if missed_last_week(first_date):
+                # new window, streak +1
+                db.collection('users').document(str(message.author.id)).update({
+                    'points': firestore.Increment(effective_points),
+                    'last_worksheet_date': str(date.today()),
+                    'first_worksheet_thisWeek_date': str(date.today()),
+                    'streak': firestore.Increment(1)
+                })
+                await message.add_reaction(worksheet_points_emojis[effective_streak])
+                sorted_data = await update_leaderboard()
+                user_position = 0
+                total_points = user_data.get('points')+effective_points
+                for index, user in enumerate(sorted_data):
+                    if user['id'] == str(message.author.id):
+                        user_position = index +1
+                        total_points = user['points']
+                        break
+                display_position = f"#{user_position}"
+                embed_data = {
+                    "title": "🎉 Worksheet Completed!",
+                    "description": f"Ahlan **{message.author.display_name}**!\nGreat job this week with the worksheet! Keep up the momentum!",
+                    "color": 0x288fcf,
+                    "thumbnail": {
+                        "url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
+                    },
+                    "fields": [
+                        {
+                            "name": "🔥 Current Streak",
+                            "value": f"**{user_data.get('streak')+1}** weeks",
+                            "inline": True
+                        },
+                        {
+                            "name": "🪙 Points Earned",
+                            "value": f"**+{effective_points}**",
+                            "inline": True
+                        },
+                        {
+                            "name": "📊 Leaderboard Rank",
+                            "value": f"**{display_position}**",
+                            "inline": True
+                        },
+                        {
+                            "name": "🪙 Total Points",
+                            "value": f"**{total_points}**",
+                            "inline": True
+                        }
+                    ],
+                    "footer": {
+                        "text": "Linguazad Community",
+                        "icon_url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
+                    }
+                }
+                try:
+                    # Convert the dictionary to an embed and send it
+                    success_embed = discord.Embed.from_dict(embed_data)
+                    await message.author.send(embed=success_embed)
+                except discord.Forbidden:
+                    await log(f"Could not DM {message.author.mention} for the streak increase message. They might have DMs disabled.")
+                await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: increased by 1")
+            else:
+                # within window, points with streak bonus but no streak increment
+                db.collection('users').document(str(message.author.id)).update({
+                    'points': firestore.Increment(effective_points),
+                    'last_worksheet_date': str(date.today()),
+                })
+                await message.add_reaction(worksheet_points_emojis[effective_streak])
+                await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: not increased because their last one was within 7 days ")
+                await update_leaderboard()
+        except Exception as e:
+            await log(f"[DEBUG] worksheet block crashed: {e}")
     if message.channel.id == config['dictation_channel_id']:
         if message.attachments and message.attachments[0].is_voice_message() and message.attachments[0].duration >= min_dictation_voice_length:
             db.collection('users').document(str(message.author.id)).update({
                 'points': firestore.Increment(voice_points)
             })
+            await message.add_reaction(voice_points_emoji)
             await update_leaderboard()
             await log(f"{message.author.mention} sent a voice message in {message.channel.mention} with over {min_dictation_voice_length} seconds of duration, points awarded: {voice_points}")
         if len(message.content) >=min_dictation_length:
@@ -384,6 +450,7 @@ async def on_message(message):
                 'points': firestore.Increment(text_points),
                 'last_writing_date': str(date.today())
             })
+            await message.add_reaction(text_points_emoji)
             await update_leaderboard()
             await log(f"{message.author.mention} sent a text message in {message.channel.mention} with over {min_dictation_length} chars, points awarded: {text_points}")
 
@@ -408,7 +475,7 @@ async def monthly_leaderboard():
         display_name = member.display_name if member else "Unknown User"  # fallback if the member isn't the bot's memory for some reason
         embed.add_field(
             name=f"#{i + 1} {display_name}",
-            value=f"Points: {int(user['points'])} | Worksheet Streak: {int(user['streak'])}",
+            value=f"Points: {int(user.get('points') or 0)} | Worksheet Streak: {int(user.get('streak') or 0)}",
             inline=False
         )
     await channel.send(embed=embed)
@@ -450,9 +517,37 @@ async def check_streaks():
     all_users = db.collection('users').get()
     for user in all_users:
         user_data = user.to_dict()
-        if missed_last_week(user_data.get('last_worksheet_date')) and user_data.get('streak', 0) > 0: #zero in the bracket is the fallback value
+        record_date = date.fromisoformat(user_data.get('last_worksheet_date', '2000-01-01'))
+        days_from_last = (date.today() - record_date).days
+        streak = user_data.get('streak', 0) #zero in the bracket is the fallback value
+        member = bot.get_user(int(user.id))
+        if days_from_last > 7 and streak > 0:
             db.collection('users').document(user.id).update({'streak': 0})
-            await log(f"Reset streak for <@{user.id}>")
+            await log(f"Reset streak for <@{user.id}>, their streak was {streak}")
+            if member:
+                try:
+                    await member.send(f"Hey, sorry to say, but your worksheet streak of {streak} has been reset, please don't let this discourage you! you can start fresh whenever you have the time!"
+                                  f"\nif you are having trouble with the worksheet and need some help, you can ask <@{config['admin1']}> or <@{config['admin2']}> for help at any time!")
+                except discord.Forbidden:
+                    await log(f"Could not sent streak reset message for {member.mention}, because they have their DMs closed")
+            else:
+                await log(f"could not send streak reminder for <@{user.id}>")
+        elif days_from_last >= 5 and streak !=0:
+            await log(f"sent streak reminder for <@{user.id}>")
+            date_until_reset = (record_date + timedelta(days=7)).isoformat()
+            if member:
+                if days_from_last == 7:
+                    msg = f"Hi, just wanted to remind you that today is your last day to keep your streak of {streak} alive, do a worksheet now to keep it going! \nYour streak expiry date is: {date_until_reset}"
+                elif days_from_last == 6:
+                    msg = f"Hello {member.mention}! I just wanted to remind you that your streak is {streak}, please do a worksheet when you can! \nYour streak expiry date is: {date_until_reset}"
+                else:
+                    msg = f"Hey, just a reminder that your streak of {streak} is going strong! Do a worksheet in the next 2 days to keep it alive! \nYour streak expiry date is: {date_until_reset}"
+                try:
+                    await member.send(msg)
+                except discord.Forbidden:
+                    await log(f"Could not sent streak reminder message for {member.mention}, because they have their DMs closed")
+            else:
+                await log(f"could not send streak reminder for <@{user.id}>")
 
 
 
