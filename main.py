@@ -17,6 +17,7 @@ from datetime import date, time, timedelta
 # HELP COMMAND
 # ATTEMPT TO ADD A WAY TO PARSE THREAD NAME TO ADD TO THE LEADER BOARD LAST WORKSHEET DONE, AND MAYBE ADD A LIST OF NOT DONE WORKSHEETS THAT THEY CAN GET DM'D to them if needed
 # streak freeze mechanic
+# improve logging of threads by claim_thread()
 
 # Loads the discord token and the firebase creds
 load_dotenv()
@@ -41,6 +42,30 @@ intents.members = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='.', intents=intents)
 
+# Variables Section
+text_points = 10
+voice_points = 15
+worksheet_points = 20
+text_points_emoji = "<:Linguazad_10:1495031679772004425>"
+voice_points_emoji = "<:Linguazad_15:1495031741633794212>"
+worksheet_points_emojis = {0: "<:Linguazad_20:1495031721329037384>",
+                           1: "<:Linguazad_22:1495036190259150990>",
+                           2: "<:Linguazad_24:1495036411018215536>",
+                           3: "<:Linguazad_26:1495036335235272764>",
+                           4: "<:Linguazad_28:1495036282521518290>"}
+task_forum_ids = {"worksheet": 1495429343915016406,
+                  "reactivation": 1495429369777098863,
+                  "vocab": 1495429419920134184,
+                  "retell": 1525353590900920440,
+                  "connect": 1525353606599934073
+                  }
+weekly_bonuspercent = 10
+min_worksheet_length = 100
+min_dictation_length = 10
+min_dictation_voice_length = 3
+min_written_length = 20
+min_speaking_length = 5
+
 # Functions Section
 
 def load_config(): #function for loading the config, used to create local var config
@@ -53,7 +78,7 @@ def load_config(): #function for loading the config, used to create local var co
         "franco_channel_id": None,
         "speaking_channel_id" : None,
         "dictation_channel_id" : None,
-        "worksheet_channel_id" : None,
+        "task_forum_id" : None,
         "leaderboard_channel_id": None,
         "leaderboard_message_id": None,
         "weekly_leaderboard_id": None,
@@ -159,6 +184,223 @@ async def log(msg):
         except Exception as e:
             print(f"Failed to send log to Discord: {e}")
 
+# Points Helper Functions Section
+
+def is_thread_claimed(channel_id: int) -> bool:
+    return db.collection('thread_submissions').document(str(channel_id)).get().exists
+
+async def claim_thread(message:discord.Message, tag: str):
+    db.collection('thread_submissions').document(str(message.channel.id)).set({
+        'channel_name': message.channel.name,
+        'user_id': message.author.id,
+        'user_name': message.author.name,
+        'tag': tag,
+        'awarded_at': str(date.today())
+    })
+
+async def handle_writing(message:discord.Message, user_data: dict, points:int = text_points, emoji:str = text_points_emoji, min_length: int = min_written_length, check_last_sent_time:bool = True, tag:str = None):
+    """
+    This helper function handles messages that qualify for writing points,
+    it checks that the message is longer than the default minimum length of min_written_length,
+    awards the default of text_points, and adds the text_points_emoji emoji as a default emoji.
+    """
+
+    if tag and is_thread_claimed(message.channel.id):
+        await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
+        return
+
+    if user_data.get('last_writing_date') != str(date.today()) or not check_last_sent_time:
+        if len(message.content) >= min_length:
+            db.collection('users').document(str(message.author.id)).update({
+                'points': firestore.Increment(points),
+                'last_writing_date': str(date.today())
+            })
+            await message.add_reaction(emoji)
+            await update_leaderboard()
+            if tag:
+                await claim_thread(message, tag)
+
+            await log(
+                f"Valid Message detected in {message.channel.mention} from {message.author.mention}, points awarded: {points}")
+
+        elif message.attachments:
+            for attachment in message.attachments:
+                if attachment.content_type and attachment.content_type.startswith("image"):
+                    db.collection('users').document(str(message.author.id)).update({
+                        'points': firestore.Increment(points),
+                        'last_writing_date': str(date.today())
+                    })
+                    await message.add_reaction(emoji)  # adds the text points emoji
+                    await update_leaderboard()
+                    if tag:
+                        await claim_thread(message, tag)
+                    await log(f"Image detected in {message.channel.mention}, points awarded: {points}")
+                    break
+    else:
+        await log(f"Message Detected in {message.channel.mention} from {message.author.mention}, but they already wrote one today. Points awarded: Zero")
+
+async def handle_speaking(message:discord.Message, user_data: dict, points:int = voice_points, emoji:str = voice_points_emoji, min_length: int =min_speaking_length, check_last_sent_time: bool = True, tag:str = None):
+    """
+    This helper function handles messages that qualify for voice points,
+    it checks that the message is longer than the default minimum length of min_speaking_length,
+    awards a default of voice_points, and adds the voice_points_emoji emoji as a default emoji.
+    """
+    if tag and is_thread_claimed(message.channel.id):
+        await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
+        return
+
+    if user_data.get('last_speaking_date') != str(date.today()) or not check_last_sent_time:
+        for attachment in message.attachments:
+            if attachment.is_voice_message() and attachment.duration >= min_length:  # checks if the user sent a voicenote, and if it is over 5 seconds
+                db.collection('users').document(str(message.author.id)).update({
+                    'points': firestore.Increment(points),
+                    'last_speaking_date': str(date.today())
+                })
+                await message.add_reaction(emoji)  # adds the voice points emoji
+                await update_leaderboard()
+                if tag:
+                    await claim_thread(message, tag)
+                await log(
+                    f"{message.author.mention} sent a voice message in {message.channel.mention}, points awarded: {points}")
+
+            elif attachment.is_voice_message():
+                await log(
+                    f"{message.author.mention} sent a voice message in {message.channel.mention}, but it was shorter than {min_speaking_length}, points awarded: Zero")
+    elif message:
+        await log(
+            f"{message.author.mention} sent a message in {message.channel.mention}, but they already sent one today, points awarded: Zero")
+
+async def handle_worksheets(message:discord.Message, user_data: dict, points:int = worksheet_points, emoji:dict = None, tag:str = None):
+    """
+
+    """
+    if emoji is None:
+        emoji = worksheet_points_emojis
+
+    if tag and is_thread_claimed(message.channel.id):
+        await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
+        return
+
+    if len(message.content) < min_worksheet_length:
+        await log(f"{message.author.mention} sent a message in {message.channel.mention}, but it was shorter than {min_worksheet_length}, points awarded: Zero")
+        return
+
+    effective_streak = min(user_data.get('streak'), 4)
+
+    try:
+        first_date = user_data.get('first_worksheet_thisWeek_date')
+        effective_points = int(points * (1 + effective_streak * weekly_bonuspercent / 100))
+        if missed_last_week(first_date):
+            # new window, streak +1
+            db.collection('users').document(str(message.author.id)).update({
+                'points': firestore.Increment(effective_points),
+                'last_worksheet_date': str(date.today()),
+                'first_worksheet_thisWeek_date': str(date.today()),
+                'streak': firestore.Increment(1)
+            })
+            await message.add_reaction(emoji[effective_streak])
+            await send_worksheet_message(message, user_data)
+            await log(
+                f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: increased by 1")
+        else:
+            # within window, points with streak bonus but no streak increment
+            db.collection('users').document(str(message.author.id)).update({
+                'points': firestore.Increment(effective_points),
+                'last_worksheet_date': str(date.today()),
+            })
+
+            await message.add_reaction(emoji[effective_streak])
+            await log(
+                f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: not increased because their last one was within 7 days ")
+        await update_leaderboard()
+        if tag:
+            await claim_thread(message, tag)
+
+    except Exception as e:
+        await log(f"[DEBUG] worksheet block crashed: {e}")
+
+async def handle_dictation(message:discord.Message):
+    """
+
+    """
+    if message.attachments and message.attachments[0].is_voice_message() and message.attachments[
+        0].duration >= min_dictation_voice_length:
+        db.collection('users').document(str(message.author.id)).update({
+            'points': firestore.Increment(voice_points)
+        })
+        await message.add_reaction(voice_points_emoji)
+        await update_leaderboard()
+        await log(
+            f"{message.author.mention} sent a voice message in {message.channel.mention} with over {min_dictation_voice_length} seconds of duration, points awarded: {voice_points}")
+
+    if len(message.content) >= min_dictation_length:
+        db.collection('users').document(str(message.author.id)).update({
+            'points': firestore.Increment(text_points),
+            'last_writing_date': str(date.today())
+        })
+        await message.add_reaction(text_points_emoji)
+        await update_leaderboard()
+        await log(
+            f"{message.author.mention} sent a text message in {message.channel.mention} with over {min_dictation_length} chars, points awarded: {text_points}")
+
+
+async def send_worksheet_message(message:discord.Message, user_data:dict, points:int = worksheet_points):
+    """
+
+    """
+    effective_streak = min(user_data.get('streak'), 4)
+    effective_points = int(points * (1 + effective_streak * weekly_bonuspercent / 100))
+    sorted_data = await update_leaderboard()
+    user_position = 0
+    total_points = user_data.get('points') + effective_points
+    for index, user in enumerate(sorted_data):
+        if user['id'] == str(message.author.id):
+            user_position = index + 1
+            total_points = user['points']
+            break
+    display_position = f"#{user_position}"
+    embed_data = {
+        "title": "🎉 Worksheet Completed!",
+        "description": f"Ahlan **{message.author.display_name}**!\nGreat job this week with the worksheet! Keep up the momentum!",
+        "color": 0x288fcf,
+        "thumbnail": {
+            "url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
+        },
+        "fields": [
+            {
+                "name": "🔥 Current Streak",
+                "value": f"**{user_data.get('streak') + 1}** weeks",
+                "inline": True
+            },
+            {
+                "name": "🪙 Points Earned",
+                "value": f"**+{effective_points}**",
+                "inline": True
+            },
+            {
+                "name": "📊 Leaderboard Rank",
+                "value": f"**{display_position}**",
+                "inline": True
+            },
+            {
+                "name": "🪙 Total Points",
+                "value": f"**{total_points}**",
+                "inline": True
+            }
+        ],
+        "footer": {
+            "text": "Linguazad Community",
+            "icon_url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
+        }
+    }
+    try:
+        # Convert the dictionary to an embed and send it
+        success_embed = discord.Embed.from_dict(embed_data)
+        await message.author.send(embed=success_embed)
+    except discord.Forbidden:
+        await log(
+            f"Could not DM {message.author.mention} for the streak increase message. They might have DMs disabled.")
+
 @bot.event
 async def on_ready(): # on ready event, essential for the bot, and has the loop checks such as the streaks reset and the monthly and weekly leaderboards
     print(f"✅ {bot.user} is online")
@@ -204,18 +446,18 @@ async def cfg(interaction):
 @bot.tree.command(name="configure", description="sets the admins and the channels", guild=get_guild()) # sets the settings document in the config collection in the DB
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def configure(interaction: discord.Interaction, franco_channel: discord.TextChannel, arabic_channel: discord.TextChannel, speaking_channel : discord.TextChannel,
-                    dictation_channel :discord.TextChannel, worksheet_channel :discord.TextChannel,leaderboard_channel: discord.TextChannel, weekly_leaderboard: discord.TextChannel ,
+                    dictation_channel :discord.TextChannel, task_forum :discord.ForumChannel,leaderboard_channel: discord.TextChannel, weekly_leaderboard_channel: discord.TextChannel,
                     log_channel: discord.TextChannel, admin1: discord.Member, admin2: discord.Member):
     if config.get("server_id") is None:
         await interaction.response.send_message("Please set the server ID first by typing .setserver", ephemeral = True)
         return
     try:
         db.collection('config').document('settings').set({'franco_channel_id' : str(franco_channel.id), 'arabic_channel_id' : str(arabic_channel.id), "speaking_channel_id" : str(speaking_channel.id)
-                                                             , "dictation_channel_id" : str(dictation_channel.id),"worksheet_channel_id": str(worksheet_channel.id) ,
-                                                           'leaderboard_channel_id' : str(leaderboard_channel.id), 'weekly_leaderboard_id':str(weekly_leaderboard.id),
+                                                             , "dictation_channel_id" : str(dictation_channel.id),"task_forum_id": str(task_forum.id),
+                                                           'leaderboard_channel_id' : str(leaderboard_channel.id), 'weekly_leaderboard_id':str(weekly_leaderboard_channel.id),
                                                           'log_channel_id' : str(log_channel.id), 'admin1' : str(admin1.id), 'admin2' : str(admin2.id)},merge=True)
         config.update(load_config())
-        await interaction.response.send_message("config updated successfully", ephemeral = True)
+        await interaction.response.send_message("Config updated successfully!", ephemeral = True)
         await log(f"Server Settings updated successfully by {interaction.user.mention}")
     except Exception as e:
         print(f"Error: {e}")
@@ -281,7 +523,7 @@ async def reset_date(interaction: discord.Interaction, user: discord.Member, dat
 async def on_message(message):
     if message.author == bot.user:
         return
-    if isinstance(message.channel, discord.Thread): #prevents it from reading messages in threads
+    if isinstance(message.channel, discord.Thread) and message.channel.parent_id != config.get("task_forum_id"): #prevents it from reading messages in threads that are not in the task answers forum
         return
 
     # Check if the message is in a tracked channel
@@ -290,9 +532,9 @@ async def on_message(message):
         config.get("arabic_channel_id"),
         config.get("speaking_channel_id"),
         config.get("dictation_channel_id"),
-        config.get("worksheet_channel_id")
+
     ]
-    if message.channel.id not in tracked_channels:
+    if (message.channel.id not in tracked_channels) and not (message.channel.parent_id == config.get("task_forum_id")):
         await bot.process_commands(message)
         return
 
@@ -306,153 +548,40 @@ async def on_message(message):
     if user_data is None:
         await bot.process_commands(message)
         return
-    # Variables Section
-    effective_streak = min(user_data.get('streak'), 4)
-    text_points = 10
-    voice_points = 15
-    worksheet_points = 20
-    text_points_emoji = "<:Linguazad_10:1495031679772004425>"
-    voice_points_emoji = "<:Linguazad_15:1495031741633794212>"
-    worksheet_points_emojis={0:"<:Linguazad_20:1495031721329037384>",
-                             1:"<:Linguazad_22:1495036190259150990>",
-                             2:"<:Linguazad_24:1495036411018215536>",
-                             3:"<:Linguazad_26:1495036335235272764>",
-                             4:"<:Linguazad_28:1495036282521518290>"}
-    weekly_bonuspercent = 10
-    min_worksheet_length = 100
-    min_dictation_length = 10
-    min_dictation_voice_length = 3
-    min_written_length = 20
-    min_speaking_length = 5
 
     if message.channel.id == config["franco_channel_id"] or message.channel.id == config["arabic_channel_id"]: #handles messages sent in the franco channel or the arabic channel
-        if user_data.get('last_writing_date') != str(date.today()):
-            if len(message.content) >=min_written_length:
-                await log(f"Valid Message detected in {message.channel.mention} from {message.author.mention}, points awarded: {text_points}")
-                db.collection('users').document(str(message.author.id)).update({
-                    'points': firestore.Increment(text_points),
-                    'last_writing_date': str(date.today())
-                })
-                await message.add_reaction(text_points_emoji)
-                await update_leaderboard()
-            elif message.attachments:
-                for attachment in message.attachments:
-                    if attachment.content_type and attachment.content_type.startswith("image"):
-                        db.collection('users').document(str(message.author.id)).update({
-                            'points': firestore.Increment(text_points),
-                            'last_writing_date':  str(date.today())
-                        })
-                        await message.add_reaction(text_points_emoji)  # adds the text points emoji
-                        await update_leaderboard()
-                        await log(f"Image detected in {message.channel.mention}, points awarded: {text_points}")
-                        break
-        else:
-            await log(f"Message Detected in {message.channel.mention} from {message.author.mention}, but they already wrote one today.")
+        await handle_writing(message, user_data)
+
     if message.channel.id == config["speaking_channel_id"] and message.attachments:
-        if user_data.get('last_speaking_date') != str(date.today()):
-            for attachment in message.attachments:
-                if attachment.is_voice_message() and attachment.duration >= min_speaking_length: #checks if the user sent a voicenote, and if it is over 5 seconds
-                    db.collection('users').document(str(message.author.id)).update({
-                        'points': firestore.Increment(voice_points),
-                        'last_speaking_date': str(date.today())
-                    })
-                    await message.add_reaction(voice_points_emoji)  # adds the voice points emoji
-                    await update_leaderboard()
-                    await log(f"{message.author.mention} sent a voice message in {message.channel.mention}, points awarded: {voice_points}")
-                else:
-                    await log(f"{message.author.mention} sent a voice message in {message.channel.mention}, but it was shorter than {min_speaking_length}")
-        else:
-            await log(f"{message.author.mention} sent a message in {message.channel.mention}, but they already sent one today ")
-    if message.channel.id == config['worksheet_channel_id'] and len(message.content) >= min_worksheet_length:
-        try:
-            first_date = user_data.get('first_worksheet_thisWeek_date')
-            effective_points = int(worksheet_points * (1 + effective_streak * weekly_bonuspercent / 100))
-            if missed_last_week(first_date):
-                # new window, streak +1
-                db.collection('users').document(str(message.author.id)).update({
-                    'points': firestore.Increment(effective_points),
-                    'last_worksheet_date': str(date.today()),
-                    'first_worksheet_thisWeek_date': str(date.today()),
-                    'streak': firestore.Increment(1)
-                })
-                await message.add_reaction(worksheet_points_emojis[effective_streak])
-                sorted_data = await update_leaderboard()
-                user_position = 0
-                total_points = user_data.get('points')+effective_points
-                for index, user in enumerate(sorted_data):
-                    if user['id'] == str(message.author.id):
-                        user_position = index +1
-                        total_points = user['points']
-                        break
-                display_position = f"#{user_position}"
-                embed_data = {
-                    "title": "🎉 Worksheet Completed!",
-                    "description": f"Ahlan **{message.author.display_name}**!\nGreat job this week with the worksheet! Keep up the momentum!",
-                    "color": 0x288fcf,
-                    "thumbnail": {
-                        "url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
-                    },
-                    "fields": [
-                        {
-                            "name": "🔥 Current Streak",
-                            "value": f"**{user_data.get('streak')+1}** weeks",
-                            "inline": True
-                        },
-                        {
-                            "name": "🪙 Points Earned",
-                            "value": f"**+{effective_points}**",
-                            "inline": True
-                        },
-                        {
-                            "name": "📊 Leaderboard Rank",
-                            "value": f"**{display_position}**",
-                            "inline": True
-                        },
-                        {
-                            "name": "🪙 Total Points",
-                            "value": f"**{total_points}**",
-                            "inline": True
-                        }
-                    ],
-                    "footer": {
-                        "text": "Linguazad Community",
-                        "icon_url": "https://i.ibb.co/BKLCTWv5/4ab2bbcfa5b9a10891406d2a84e94004.webp"
-                    }
-                }
-                try:
-                    # Convert the dictionary to an embed and send it
-                    success_embed = discord.Embed.from_dict(embed_data)
-                    await message.author.send(embed=success_embed)
-                except discord.Forbidden:
-                    await log(f"Could not DM {message.author.mention} for the streak increase message. They might have DMs disabled.")
-                await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: increased by 1")
-            else:
-                # within window, points with streak bonus but no streak increment
-                db.collection('users').document(str(message.author.id)).update({
-                    'points': firestore.Increment(effective_points),
-                    'last_worksheet_date': str(date.today()),
-                })
-                await message.add_reaction(worksheet_points_emojis[effective_streak])
-                await log(f"{message.author.mention} sent a worksheet answer in {message.channel.mention}, points awarded: {effective_points}, streak: not increased because their last one was within 7 days ")
-                await update_leaderboard()
-        except Exception as e:
-            await log(f"[DEBUG] worksheet block crashed: {e}")
+        await handle_speaking(message, user_data)
+
+    if message.channel.parent_id == config.get("task_forum_id"):
+        if message.channel.applied_tags:
+            in_tags = False
+            for tag in message.channel.applied_tags:
+                if tag.id in task_forum_ids.values():
+                    in_tags = True
+            if not in_tags:
+                await log(f"{message.author.mention} sent a message in {message.channel.mention}, with a tag that is not in the tags list, the tags of the post are {message.channel.applied_tags}"
+                          f"\nPlease update the bot with the proper tags")
+            for tag in message.channel.applied_tags:
+                if tag.id == task_forum_ids.get("worksheet"):
+                    await handle_worksheets(message, user_data, tag = tag.name)
+                if tag.id == task_forum_ids.get("reactivation"):
+                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                if tag.id == task_forum_ids.get("vocab"):
+                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                if tag.id == task_forum_ids.get("retell"):
+                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                if tag.id == task_forum_ids.get("connect"):
+                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+
     if message.channel.id == config['dictation_channel_id']:
-        if message.attachments and message.attachments[0].is_voice_message() and message.attachments[0].duration >= min_dictation_voice_length:
-            db.collection('users').document(str(message.author.id)).update({
-                'points': firestore.Increment(voice_points)
-            })
-            await message.add_reaction(voice_points_emoji)
-            await update_leaderboard()
-            await log(f"{message.author.mention} sent a voice message in {message.channel.mention} with over {min_dictation_voice_length} seconds of duration, points awarded: {voice_points}")
-        if len(message.content) >=min_dictation_length:
-            db.collection('users').document(str(message.author.id)).update({
-                'points': firestore.Increment(text_points),
-                'last_writing_date': str(date.today())
-            })
-            await message.add_reaction(text_points_emoji)
-            await update_leaderboard()
-            await log(f"{message.author.mention} sent a text message in {message.channel.mention} with over {min_dictation_length} chars, points awarded: {text_points}")
+        await handle_dictation(message)
 
     await bot.process_commands(message) #crucial so the bot can process written commands like .setserver
 
@@ -486,6 +615,7 @@ async def monthly_leaderboard():
         db.collection('users').document(user.id).update({'points': 0})
     # await interaction.response.send_message("test", ephemeral=True)
     await log(f"Monthly leaderboard for {date.today().strftime('%B')} sent, and all the points are reset! ")
+    await update_leaderboard()
 # Weekly Leaderboard Handling
 @tasks.loop(time= time(hour = 0, minute = 0, second = 0))
 #@bot.tree.command(name="weekly_leaderboard", description="Tests the weekly leaderboard", guild=get_guild())
