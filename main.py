@@ -19,6 +19,9 @@ from datetime import date, time, timedelta
 # streak freeze mechanic
 # improve logging of threads by claim_thread()
 
+# FIX LIST
+# ATTACHING A PHOTO THAT UPDATES THE THREAD DOESNT COUNT AND DOESNT GIVE POINTS
+
 # Loads the discord token and the firebase creds
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
@@ -198,14 +201,14 @@ async def claim_thread(message:discord.Message, tag: str):
         'awarded_at': str(date.today())
     })
 
-async def handle_writing(message:discord.Message, user_data: dict, points:int = text_points, emoji:str = text_points_emoji, min_length: int = min_written_length, check_last_sent_time:bool = True, tag:str = None):
+async def handle_writing(message:discord.Message, user_data: dict, points:int = text_points, emoji:str = text_points_emoji, min_length: int = min_written_length, check_last_sent_time:bool = True, tag:str = None, alone:bool = True):
     """
     This helper function handles messages that qualify for writing points,
     it checks that the message is longer than the default minimum length of min_written_length,
     awards the default of text_points, and adds the text_points_emoji emoji as a default emoji.
     """
 
-    if tag and is_thread_claimed(message.channel.id):
+    if tag and is_thread_claimed(message.channel.id) and alone:
         await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
         return
 
@@ -239,13 +242,13 @@ async def handle_writing(message:discord.Message, user_data: dict, points:int = 
     else:
         await log(f"Message Detected in {message.channel.mention} from {message.author.mention}, but they already wrote one today. Points awarded: Zero")
 
-async def handle_speaking(message:discord.Message, user_data: dict, points:int = voice_points, emoji:str = voice_points_emoji, min_length: int =min_speaking_length, check_last_sent_time: bool = True, tag:str = None):
+async def handle_speaking(message:discord.Message, user_data: dict, points:int = voice_points, emoji:str = voice_points_emoji, min_length: int =min_speaking_length, check_last_sent_time: bool = True, tag:str = None, alone:bool = True):
     """
     This helper function handles messages that qualify for voice points,
     it checks that the message is longer than the default minimum length of min_speaking_length,
     awards a default of voice_points, and adds the voice_points_emoji emoji as a default emoji.
     """
-    if tag and is_thread_claimed(message.channel.id):
+    if tag and is_thread_claimed(message.channel.id) and alone:
         await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
         return
 
@@ -343,6 +346,12 @@ async def handle_dictation(message:discord.Message):
         await log(
             f"{message.author.mention} sent a text message in {message.channel.mention} with over {min_dictation_length} chars, points awarded: {text_points}")
 
+async def handle_message(message:discord.Message, user_data: dict, voice_points:int = voice_points, text_points:int = text_points, voice_emoji:str = voice_points_emoji, text_emoji:str = text_points_emoji, min_speaking_length: int =min_speaking_length, min_length:int = min_written_length, check_last_sent_time: bool = True, tag:str = None):
+    if tag and is_thread_claimed(message.channel.id):
+        await log(f"Follow up message sent in {message.channel.mention} by {message.author.mention}")
+        return
+    await handle_writing(message, user_data, points= text_points, emoji = text_emoji, min_length= min_written_length, alone = False, check_last_sent_time=check_last_sent_time, tag=tag)
+    await handle_speaking(message, user_data, points= voice_points, emoji = voice_emoji, min_length= min_speaking_length, alone = False, check_last_sent_time=check_last_sent_time, tag=tag)
 
 async def send_worksheet_message(message:discord.Message, user_data:dict, points:int = worksheet_points):
     """
@@ -568,17 +577,13 @@ async def on_message(message):
                 if tag.id == task_forum_ids.get("worksheet"):
                     await handle_worksheets(message, user_data, tag = tag.name)
                 if tag.id == task_forum_ids.get("reactivation"):
-                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
-                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_message(message, user_data,check_last_sent_time=False, tag = tag.name)
                 if tag.id == task_forum_ids.get("vocab"):
-                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
-                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_message(message, user_data, check_last_sent_time=False, tag=tag.name)
                 if tag.id == task_forum_ids.get("retell"):
-                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
-                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_message(message, user_data, check_last_sent_time=False, tag=tag.name)
                 if tag.id == task_forum_ids.get("connect"):
-                    await handle_writing(message, user_data, check_last_sent_time=False, tag=tag.name)
-                    await handle_speaking(message, user_data, check_last_sent_time=False, tag=tag.name)
+                    await handle_message(message, user_data,check_last_sent_time=False, tag = tag.name)
 
     if message.channel.id == config['dictation_channel_id']:
         await handle_dictation(message)
